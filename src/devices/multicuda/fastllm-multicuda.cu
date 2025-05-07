@@ -183,8 +183,69 @@ namespace fastllm {
                 printf("Error: CpuRunMatmul unsupport type: %d.\n", weightDataType);;
                 exit(0);
             } else if (weightDataType == DataType::INT4_NOZERO) {
-                printf("Error: CpuRunMatmul unsupport type: %d.\n", weightDataType);;
-                exit(0);
+                // printf("Error: CpuRunMatmul unsupport type1: %d.\n", weightDataType);;
+                // printf("Error: CpuRunMatmul unsupport type1: %d.\n", weightDataType);;
+                // exit(0);
+                groupCnt = 128;
+                group = (m - 1) / groupCnt + 1;
+                uint8_t *weightData = (uint8_t *) weight;
+                if (oriWeight->weightSum.size() == 0) {
+                    auto &weightSum = oriWeight->weightSum;
+                    weightSum.resize(k * group);
+                    for (int i = 0; i < k; i++) {
+                        for (int g = 0; g < group; g++) {
+                            int gid = i * group + g;
+                            int st = g * groupCnt;
+                            int end = std::min(m, (g + 1) * groupCnt);
+                            int j = st;
+                            for (; j + 1 < end; j += 2) {
+                                int id = (i * m + j) / 2;
+                                weightSum[gid] += (weightData[id] & 0xF) + (weightData[id] >> 4);
+                            }
+                            for (; j < end; j++) {
+                                int id = (i * m + j) / 2;
+                                if ((i * m + j) % 2) {
+                                    weightSum[gid] += (weightData[id] & 0xF);
+                                } else {
+                                    weightSum[gid] += (weightData[id] >> 4);
+                                }
+                            }
+                        }
+                    }
+
+                    oriWeight->mins.resize(k * group);
+                    oriWeight->scales.resize(k * group);
+                    Float16ToFloat32((uint16_t*)mins, oriWeight->mins.data(), k * group);
+                    Float16ToFloat32((uint16_t*)scales, oriWeight->scales.data(), k * group);
+                }
+                std::vector<LowBitConfig> inputConfigs;
+                inputConfigs.resize(n * group);
+                std::vector<uint8_t> uinput;
+                uinput.resize(n * m);
+                std::vector <float> inputSums;
+                inputSums.resize(n * group);
+                std::vector <float> iscales, izeros;
+                iscales.resize(n * group);
+                izeros.resize(n * group);
+                MultiThreadOnlineQuantizationOp(inputData, uinput.data(), inputConfigs.data(), n, m, group, groupCnt, inputSums.data(), iscales.data(), izeros.data(), 1).Run();
+                int per = k / threadNum;
+                int cur = 0;
+                std::vector<fastllm::MultiThreadLinearInt8Int4GroupOp*> ops;
+                for (int i = 0; i < threadNum; i++) {
+                    int end = (i == threadNum - 1 ? k : cur + per + (cur + per * (threadNum - i) < k));
+                    ops.push_back(new MultiThreadLinearInt8Int4GroupOp(uinput.data(), weightData + cur * m / 2, outputData + cur, n, m, end - cur, k,
+                                                    oriWeight->weightSum.data() + cur * group, oriWeight->mins.data() + cur * group, oriWeight->scales.data() + cur * group,
+                                                    (bias == nullptr ? (float *) nullptr : (float*)bias + cur), iscales.data(), izeros.data(),
+                                                    inputSums.data(), group, groupCnt));
+                    cur = end;
+                }
+                for (int i = 0; i < threadNum; i++) {
+                    pool->PushOp(startTid + i, ops[i]);
+                }
+                for (int i = 0; i < threadNum; i++) {
+                    pool->Wait(startTid + i);
+                    delete ops[i];
+                }
             } else if (weightDataType == DataType::INT4_GROUP) {
 // auto st = std::chrono::system_clock::now();
                 uint8_t *weightData = (uint8_t *) weight;
@@ -304,8 +365,72 @@ namespace fastllm {
                 printf("Error: CpuRunMatmul unsupport type: %d.\n", weightDataType);;
                 exit(0);
             } else if (weightDataType == DataType::INT4_NOZERO) {
-                printf("Error: CpuRunMatmul unsupport type: %d.\n", weightDataType);;
-                exit(0);
+                // printf("Error: CpuRunMatmul unsupport type: %d.\n", weightDataType);;
+                // exit(0);
+                groupCnt = 128;
+                group = (m - 1) / groupCnt + 1;
+                std::vector <float> floatInput, floatOutput;
+                floatInput.resize(n * m);
+                floatOutput.resize(n * k);
+                Float16ToFloat32((uint16_t*)inputData, floatInput.data(), n * m);
+
+                uint8_t *weightData = (uint8_t *) weight;
+                if (oriWeight->weightSum.size() == 0) {
+                    auto &weightSum = oriWeight->weightSum;
+                    weightSum.resize(k * group);
+                    for (int i = 0; i < k; i++) {
+                        for (int g = 0; g < group; g++) {
+                            int gid = i * group + g;
+                            int st = g * groupCnt;
+                            int end = std::min(m, (g + 1) * groupCnt);
+                            int j = st;
+                            for (; j + 1 < end; j += 2) {
+                                int id = (i * m + j) / 2;
+                                weightSum[gid] += (weightData[id] & 0xF) + (weightData[id] >> 4);
+                            }
+                            for (; j < end; j++) {
+                                int id = (i * m + j) / 2;
+                                if ((i * m + j) % 2) {
+                                    weightSum[gid] += (weightData[id] & 0xF);
+                                } else {
+                                    weightSum[gid] += (weightData[id] >> 4);
+                                }
+                            }
+                        }
+                    }
+
+                    oriWeight->mins.resize(k * group);
+                    oriWeight->scales.resize(k * group);
+                    Float16ToFloat32((uint16_t*)mins, oriWeight->mins.data(), k * group);
+                    Float16ToFloat32((uint16_t*)scales, oriWeight->scales.data(), k * group);
+                }
+                std::vector<LowBitConfig> inputConfigs;
+                inputConfigs.resize(n * group);
+                std::vector<uint8_t> uinput;
+                uinput.resize(n * m);
+                std::vector <float> inputSums;
+                inputSums.resize(n * group);
+                std::vector <float> iscales, izeros;
+                iscales.resize(n * group);
+                izeros.resize(n * group);
+                MultiThreadOnlineQuantizationOp(floatInput.data(), uinput.data(), inputConfigs.data(), n, m, group, groupCnt, inputSums.data(), iscales.data(), izeros.data(), 1).Run();
+                int per = k / threadNum;
+                int cur = 0;
+                std::vector<fastllm::MultiThreadLinearInt8Int4GroupOp*> ops;
+                for (int i = 0; i < threadNum; i++) {
+                    int end = (i == threadNum - 1 ? k : cur + per + (cur + per * (threadNum - i) < k));
+                    ops.push_back(new MultiThreadLinearInt8Int4GroupOp(uinput.data(), weightData + cur * m / 2, floatOutput.data() + cur, n, m, end - cur, k, oriWeight->weightSum.data() + cur * group, oriWeight->mins.data() + cur * group, oriWeight->scales.data() + cur * group, floatBias.data() + cur, iscales.data(), izeros.data(), inputSums.data(), group, groupCnt));
+                    cur = end;
+                }
+                for (int i = 0; i < threadNum; i++) {
+                    pool->PushOp(startTid + i, ops[i]);
+                }
+                for (int i = 0; i < threadNum; i++) {
+                    pool->Wait(startTid + i);
+                    delete ops[i];
+                }
+
+                Float32ToFloat16(floatOutput.data(), (uint16_t*)outputData, n * k);
             } else if (weightDataType == DataType::INT4_GROUP) {
                 std::vector <float> floatInput, floatOutput;
                 floatInput.resize(n * m);
@@ -575,6 +700,7 @@ namespace fastllm {
 
         void Run() {
             T *curOutput = new T[n * len];
+            // printf("MatMulSingleOp %d, %d, %d, %d\n",n,m,group,groupCnt);
             CpuRunMatmul(oriWeight, weight, weightDataType, bias, n, m, len, hasBias, scales, mins, zeros, group, groupCnt, cpuInput, curOutput, pool, curStartTid, curThreadNum);
             cudaMemcpy2D(cudaOutput + start, k * sizeof(T), curOutput, len * sizeof(T), len * sizeof(T), n, cudaMemcpyHostToDevice);
             delete[] curOutput;
@@ -671,6 +797,8 @@ namespace fastllm {
             threadNum(threadNum), tid(tid), pool(pool), curStartTid(curStartTid), curThreadNum(curThreadNum) {}
 
         void Run() {
+            // printf("MLPSingleOp %d, %d\n",n,m);
+
             T *mid0 = (T*)AutoMalloc(n * k1 * sizeof(T), 0);
             T *mid1 = (T*)AutoMalloc(n * k1 / 2 * sizeof(T), 0);
             *curOutput = (T*)AutoMalloc(n * k2 * sizeof(T), 0);
